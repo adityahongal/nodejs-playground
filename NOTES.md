@@ -228,10 +228,3 @@ Holds environment variables. Used for **config/secrets** (DB URLs, API keys, por
 ```js
 const PORT = process.env.PORT || 3000;
 ```
-
----
-
-## Git Habits (recruiter visibility)
-- Commit each working feature; push regularly (green squares).
-- git `user.email` must match a GitHub-verified email or commits won't count.
-- Message style: `type: summary` (`feat:`, `fix:`, `chore:`, `docs:`) + bullets on what/why.
