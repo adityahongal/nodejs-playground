@@ -78,6 +78,11 @@ Even with `0ms`, `setTimeout`'s callback is queued and only runs **after** the c
 
 ## 4. Modules: CommonJS vs ES Modules (⭐ often missed, often asked)
 
+> 🎯 **My strategy:** WRITE in ES Modules (modern standard, pairs with React). Know CommonJS
+> only at **read & recognize** level — you'll constantly *read* it in existing codebases, npm
+> packages, and older tutorials, and the difference is a common interview question. Don't invest
+> in writing CJS fluently.
+
 ### ⭐ Q: What's the difference between CommonJS and ES Modules?
 | | CommonJS (CJS) | ES Modules (ESM) |
 |---|---|---|
@@ -104,6 +109,11 @@ import { add } from "./math.js";
 
 ### Q: How do you enable ES Modules in Node?
 Add `"type": "module"` to `package.json`, OR name files `.mjs`. Without it, `import` throws a SyntaxError.
+
+### ⭐ Q: How does Node decide CommonJS vs ESM? (recognize-level)
+- **File extension wins:** `.cjs` = always CommonJS, `.mjs` = always ESM.
+- **`.js` files:** follow the nearest `package.json`'s `"type"` field (`"module"` = ESM, absent/`"commonjs"` = CJS).
+- Common error to recognize: **`require is not defined in ES module scope`** → you used `require` in a file Node is treating as ESM. Fix: use `import`, or rename the file `.cjs`.
 
 ### ⭐ Q: Named vs default export?
 ```js
