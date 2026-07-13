@@ -76,6 +76,85 @@ Even with `0ms`, `setTimeout`'s callback is queued and only runs **after** the c
 
 ---
 
+## 3b. libuv, V8 & the Thread Pool (⭐ deep-dive, common)
+
+### ⭐ Q: What is libuv?
+A **C library** bundled inside Node that gives Node its async powers. It provides:
+1. **The event loop** — juggles many operations on one thread.
+2. **A thread pool (default 4 threads)** — runs operations the OS can't do async natively (mainly `fs` file system + `crypto` + DNS) on background threads, so the main thread stays free.
+
+### ⭐ Q: Difference between V8 and libuv?
+| | **V8** | **libuv** |
+|---|---|---|
+| Language | C++ | C |
+| Job | **Runs your JavaScript** (compiles JS → machine code) | **Async I/O + event loop** (timers, fs, network) |
+| Analogy | The **brain** (understands JS) | The **hands** (talks to OS/disk/network) |
+
+**One-liner:** *"V8 executes the JavaScript; libuv provides the non-blocking, event-driven I/O via the event loop and a thread pool. Node = V8 + libuv + Node's own APIs."*
+
+### ⭐ Q: How does the event loop actually work? (call stack ↔ libuv ↔ queue)
+```
+CALL STACK (V8 runs JS, one thing at a time)
+   │ hits async op (setTimeout, fs.readFile, crypto)
+   ▼
+libuv runs it in the BACKGROUND (timer via OS, or fs/crypto via thread pool)
+   │ when done, pushes the callback into...
+   ▼
+CALLBACK QUEUE (waiting line)
+   ▲
+EVENT LOOP: "is the call stack EMPTY? → move next callback onto the stack and run it"
+```
+**Golden rule:** a queued callback only runs when the **call stack is empty** (all synchronous code finished). This one rule explains async ordering.
+
+### Q: Trace — why does `4, 2, 3, 1` print from `func4(); func1(); func2(); func3();`?
+```js
+func4(); // fs.writeFileSync + log  → BLOCKING, runs fully on the stack → prints "4" first
+func1(); // setTimeout(cb, 2000)    → hands timer to libuv, returns immediately → prints nothing yet
+func2(); // log                     → prints "2"
+func3(); // log                     → prints "3"
+// stack now EMPTY. 2s later, libuv queues func1's cb → event loop runs it → prints "1" LAST
+```
+
+### ⭐ Q: The thread pool — how do you PROVE it has 4 threads?
+Fire 6 heavy `crypto.pbkdf2` jobs at once and time them:
+```js
+import crypto from "crypto";
+const start = Date.now();
+function slowJob(name) {
+  crypto.pbkdf2("secret", "salt", 100000, 64, "sha512", () => {
+    console.log(`${name} done after ${((Date.now()-start)/1000).toFixed(1)}s`);
+  });
+}
+for (let i = 1; i <= 6; i++) slowJob(`Job ${i}`);
+```
+**Result:** first **4 jobs finish together**, then **jobs 5 & 6 finish in a second wave** — because only 4 threads exist, so the extras wait their turn.
+- `UV_THREADPOOL_SIZE=2 node index.js` → jobs finish **2 at a time** (waves of 2).
+- `UV_THREADPOOL_SIZE=6 node index.js` → all **6 finish together**.
+
+Proof: jobs started at the same instant finish in **waves the size of the pool**, and resizing the pool resizes the waves.
+
+### ⚠️ Note: timers vs thread pool
+`setTimeout`/network use the OS directly (NOT the thread pool). Only **`fs`, `crypto`, DNS** use the thread pool. So to demo the pool, use `crypto`/`fs`, not `setTimeout`.
+
+### ⭐ Q: Browser event loop vs Node event loop — what's the difference?
+Same *concept*, different *background machinery*:
+```
+Browser:  Call Stack → Web APIs (background) → Callback Queue → Event Loop → Stack
+Node:     Call Stack → libuv    (background) → Callback Queue → Event Loop → Stack
+                       ▲ only this box differs
+```
+| | Browser | Node |
+|---|---|---|
+| Background crew | **Web APIs** (browser feature, C++) | **libuv** (C library) |
+| Async examples | setTimeout, fetch, DOM events | timers, fs, network, crypto |
+| Thread pool for files? | ❌ no file system | ✅ libuv thread pool |
+| Extra concerns | rendering, requestAnimationFrame | none (no UI) |
+
+**libuv is Node's version of the browser's Web APIs.** When you did `setTimeout`/`fetch().then()` in React, the browser offloaded + queued the callback exactly like libuv does in Node.
+*(Both also have a higher-priority **microtask queue** for Promises/`await` that runs before the normal callback queue.)*
+
+---
+
 ## 4. Modules: CommonJS vs ES Modules (⭐ often missed, often asked)
 
 > 🎯 **My strategy:** WRITE in ES Modules (modern standard, pairs with React). Know CommonJS
