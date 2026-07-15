@@ -406,3 +406,112 @@ Holds environment variables. Used for **config/secrets** (DB URLs, API keys, por
 ```js
 const PORT = process.env.PORT || 3000;
 ```
+
+### Q: What is the REPL?
+**REPL = Read–Eval–Print–Loop** — the interactive Node prompt. Type `node` (no filename) → get `>` → run JS live. Lifecycle = the loop: Read input → Evaluate → Print result → Loop. Great for testing snippets. `.exit` or Ctrl+C twice to quit. (Browser console is basically a REPL.)
+
+### Q: What is the `os` module?
+Built-in module for info about the machine/OS Node runs on.
+```js
+import os from "os";
+os.platform();        // "darwin" | "win32" | "linux"
+os.cpus().length;     // number of CPU cores (used to size worker pools)
+os.totalmem();        // total RAM (bytes)
+os.homedir();         // "/Users/adityahongal"
+```
+
+---
+
+## 9. File System (`fs`) module (⭐ core)
+
+### ⭐ Q: What is `fs`? Which "engine" runs it?
+Built-in module (no install) to read/write/manage files & folders. It's the classic **thread-pool** I/O — async `fs` work runs on one of libuv's 4 background threads.
+
+### ⭐ Q: The 3 flavors of every `fs` operation?
+```js
+// 1. CALLBACK (original) — error-first callback
+import fs from "fs";
+fs.readFile("f.txt", "utf-8", (err, data) => { if (err) return; console.log(data); });
+
+// 2. PROMISE (MODERN — use this) — clean with async/await
+import fs from "fs/promises";
+const data = await fs.readFile("f.txt", "utf-8");
+
+// 3. SYNC — BLOCKS the main thread; result RETURNED directly; errors THROWN
+import fs from "fs";
+const data = fs.readFileSync("f.txt", "utf-8");
+```
+**Rule:** apps use `fs/promises` + `await`. Sync only for one-time startup scripts, NEVER in a request handler (blocks all requests).
+
+### Q: Common operations (promise style)
+```js
+import fs from "fs/promises";
+await fs.writeFile("f.txt", "hi");        // create/OVERWRITE whole file
+await fs.appendFile("f.txt", "\nmore");   // add to end (keeps existing)
+await fs.readFile("f.txt", "utf-8");      // read → string
+await fs.rename("f.txt", "g.txt");        // rename/move
+await fs.unlink("g.txt");                 // DELETE a file ("unlink")
+await fs.mkdir("logs", { recursive: true }); // make folder; recursive = no crash if exists
+await fs.readdir(".");                    // list folder → array of names
+await fs.stat("g.txt");                   // info: .size, .birthtime, etc.
+```
+
+### ⭐ Q: How does async `fs` + `await` work in the event loop / call stack?
+Each `await fs.x()`:
+1. hands the disk work to **libuv's thread pool** (background thread),
+2. your `async` function **pops OFF the call stack** — the main thread is FREE (not frozen),
+3. when the disk finishes, the "continue after await" is queued as a **microtask** and put back on the stack.
+
+`await` runs steps **in order** (write finishes before read starts) WITHOUT blocking — that's why it beats `...Sync`:
+| | `fs/promises` + await | `readFileSync` |
+|---|---|---|
+| Disk work runs on | libuv thread pool (bg) | main thread (call stack) |
+| Main thread while waiting | FREE — serves others | FROZEN |
+| Server impact | ✅ responsive | ❌ blocks all requests |
+
+### Q: Sequential vs parallel file ops?
+```js
+await readFile("a"); await readFile("b");            // sequential: total = sum
+await Promise.all([readFile("a"), readFile("b")]);   // parallel: total = slowest (use when order doesn't matter)
+```
+Dependent steps (rename after write) → sequential `await`. Independent reads → `Promise.all`.
+
+### ⚠️ CAVEATS (don't-skip)
+- **`writeFile` OVERWRITES** the whole file — use `appendFile` to add. Beginners lose data here.
+- **Encoding:** without `"utf-8"` you get a raw **Buffer** (binary bytes), not a string. A Buffer = Node's way to hold raw binary (files aren't always text — images/video/zip are binary).
+- **Paths are relative to where you RUN `node`**, not where the file lives → anchor paths to the file (see below).
+- **ESM has no `__dirname`/`__filename`** — rebuild them:
+  ```js
+  import path from "path"; import { fileURLToPath } from "url";
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const file = path.join(__dirname, "data.txt"); // reliable path
+  ```
+  (CommonJS has `__dirname`/`__filename` built in.)
+
+### ⭐ Q: Error-handling patterns?
+```js
+// callback → error-first arg
+readFile("x", (err, data) => { if (err) return console.error(err); });
+// promise/sync → try/catch, then inspect err.code
+try { await readFile("x", "utf-8"); }
+catch (err) { if (err.code === "ENOENT") console.log("not found"); else throw err; }
+```
+Common codes: **`ENOENT`** (no such file — #1 error), `EACCES` (no permission), `EEXIST` (already exists).
+
+### ⭐ Q: Race conditions with files? (interview-worthy)
+A race condition = two ops run "at the same time" and the result depends on which finishes first → unpredictable. Classic **check-then-act** bug:
+```js
+// ❌ file could be created BETWEEN the check and the write
+if (!existsSync("f.txt")) await writeFile("f.txt", "x");
+// ✅ act atomically, handle the error instead of checking first
+try { await writeFile("f.txt", "x", { flag: "wx" }); } // "wx" = fail if exists
+catch (err) { if (err.code === "EEXIST") console.log("already exists"); }
+```
+Also: many concurrent `appendFile`s to the SAME file can interleave/corrupt — use sequential `await` or a queue. Lesson: with concurrent I/O, don't assume order; make each op self-contained.
+
+### Q: `fs.watch()`?
+Watches a file/folder for changes and fires a callback on edit/rename/delete. Keeps the process alive (like a server). This is how **nodemon** auto-restarts. Rarely written directly.
+```js
+import { watch } from "fs";
+watch("myFolder", (eventType, filename) => console.log(eventType, filename));
+```

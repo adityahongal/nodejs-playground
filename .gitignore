@@ -1,4 +1,7 @@
 **/node_modules
 **/.env
 
+# generated experiment artifacts
 sample.txt
+sync-demo.txt
+**/myFolder/
