@@ -205,6 +205,40 @@ Same code, different result depending on module system AND scope:
 - **Lesson:** never write code that depends on the razor-thin nextTick-vs-Promise ordering — it's fragile. (Another reason to avoid `process.nextTick`.)
 - Proof: see `04-Micro-Macro-tasks/` (`index.js` ESM vs `index.cjs`, and `nexttick-scope.js`).
 
+### ⭐ Q: Real-world use — `process.nextTick` vs Promises? (+ call-stack view)
+Both are microtasks (run after the stack empties, before macrotasks). Difference is *what you use them for*:
+
+| | `process.nextTick` | Promises / `async-await` |
+|---|---|---|
+| Real use | Library internals — "let the caller finish setup / attach listeners before I emit" | Real async work: DB, API, file reads |
+| You'll use it? | Rarely (mostly library authors) | **Constantly** (every app) |
+| Priority | Highest microtask (before Promises) | After nextTick |
+| Call stack | Runs after stack empties, ahead of Promises | Function **leaves** the stack at `await`, resumes later as a microtask |
+
+**nextTick use case** — emit an event only after the caller can attach a listener:
+```js
+function connect() {
+  const conn = new EventEmitter();
+  process.nextTick(() => conn.emit("ready")); // defer: caller's .on() runs first
+  return conn;
+}
+const c = connect();
+c.on("ready", () => console.log("connected!")); // attached AFTER connect() returns → still caught
+// Emitting synchronously would fire before .on() exists → event MISSED.
+```
+
+**Promise use case** — do slow I/O without blocking, then continue:
+```js
+async function getDashboard(id) {
+  const user = await db.findUser(id);      // function leaves the stack while waiting
+  const orders = await api.getOrders(id);  // resumes as a microtask when result arrives
+  return { user, orders };
+}
+```
+**Call-stack insight:** at `await`, the async function pops OFF the stack (thread is free for other work); when the awaited result is ready, the code *after* `await` is queued as a microtask and put back on the stack. That's *why* Promises are non-blocking.
+
+**Takeaway:** `nextTick` = niche timing control (rarely needed). Promises/`await` = your everyday tool for every DB/API/file call.
+
 ### Q: `setImmediate` vs `setTimeout(fn, 0)`?
 Both Node-only-ish macrotasks. `setImmediate` runs in the **Check** phase (after I/O/poll); `setTimeout(fn,0)` runs in the **Timers** phase. Inside an I/O callback, `setImmediate` reliably fires first.
 
