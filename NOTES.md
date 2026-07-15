@@ -155,6 +155,61 @@ Node:     Call Stack → libuv    (background) → Callback Queue → Event Loop
 
 ---
 
+## 3c. Microtasks vs Macrotasks & `process.nextTick` (⭐ top interview topic)
+
+### ⭐ Q: What are microtasks and macrotasks?
+Two separate callback queues. **Microtasks have priority** — after each macrotask, the event loop drains the ENTIRE microtask queue before the next macrotask. Microtasks "jump the line."
+
+### ⭐ Q: What goes in each queue?
+**Node.js — priority order (high → low):**
+1. **Synchronous code** (call stack) — always first
+2. **Microtasks:** `process.nextTick()` (highest), then Promises (`.then`/`await`/`queueMicrotask`)
+3. **Macrotasks (in phases):** Timers (`setTimeout`/`setInterval`) → Poll (I/O callbacks: fs, network) → Check (`setImmediate`) → Close events
+
+**Browser — priority order:**
+1. Synchronous code
+2. **Microtasks:** Promises, `queueMicrotask`, `MutationObserver` (NO `process.nextTick` — Node-only)
+3. **Macrotasks:** `setTimeout`/`setInterval`, I/O, UI events, `MessageChannel`
+4. **Render** (paint the screen — Node has none). `requestAnimationFrame` runs just before paint.
+
+| | Node.js | Browser |
+|---|---|---|
+| Highest microtask | `process.nextTick` | (none — starts at Promises) |
+| Microtasks | Promises, queueMicrotask | Promises, queueMicrotask, MutationObserver |
+| Macrotasks | setTimeout, I/O, **setImmediate**, close | setTimeout, I/O, UI events, MessageChannel |
+| Extras | event-loop phases | requestAnimationFrame + rendering |
+
+### ⭐ Q: What does this print?
+```js
+console.log("1");
+setTimeout(() => console.log("2"), 0);        // macrotask
+Promise.resolve().then(() => console.log("3")); // microtask
+console.log("4");
+// Output: 1, 4, 3, 2  (sync first, then microtask Promise, then macrotask timer)
+```
+
+### Q: What is `process.nextTick`?
+- Node-only (`process` is a Node global; browser has no `process`).
+- `process.nextTick(cb)` = "run cb immediately after the current operation, before the event loop moves on to Promises/timers/I/O." Normally the **highest-priority** microtask.
+- **Purpose:** run something right after current code but still async; let an object finish setup before emitting an event.
+- ⚠️ Rarely needed as a beginner. Overuse can **starve** the event loop (endless nextTicks block timers/I/O). Prefer Promises/`setImmediate`.
+
+### ⚠️ GOTCHA: ESM top-level flips nextTick vs Promise (found by experiment!)
+Same code, different result depending on module system AND scope:
+| Where | ES Module (`.mjs`/`"type":"module"`) | CommonJS (`.cjs`) |
+|---|---|---|
+| **Top-level (global)** | Promise → nextTick (**flipped!**) | nextTick → Promise ✅ |
+| **Inside a callback** | nextTick → Promise ✅ | nextTick → Promise ✅ |
+
+- **Why:** ESM top-level code is evaluated inside a promise-based module loader, so top-level Promise callbacks drain before the nextTick queue. Inside any function/callback, textbook order returns.
+- **Lesson:** never write code that depends on the razor-thin nextTick-vs-Promise ordering — it's fragile. (Another reason to avoid `process.nextTick`.)
+- Proof: see `04-Micro-Macro-tasks/` (`index.js` ESM vs `index.cjs`, and `nexttick-scope.js`).
+
+### Q: `setImmediate` vs `setTimeout(fn, 0)`?
+Both Node-only-ish macrotasks. `setImmediate` runs in the **Check** phase (after I/O/poll); `setTimeout(fn,0)` runs in the **Timers** phase. Inside an I/O callback, `setImmediate` reliably fires first.
+
+---
+
 ## 4. Modules: CommonJS vs ES Modules (⭐ often missed, often asked)
 
 > 🎯 **My strategy:** WRITE in ES Modules (modern standard, pairs with React). Know CommonJS
