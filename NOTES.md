@@ -515,3 +515,44 @@ Watches a file/folder for changes and fires a callback on edit/rename/delete. Ke
 import { watch } from "fs";
 watch("myFolder", (eventType, filename) => console.log(eventType, filename));
 ```
+
+---
+
+## 10. Event Emitters (⭐ core pattern)
+
+### ⭐ Q: What is an Event Emitter?
+An object implementing the **publish/subscribe (pub/sub)** pattern: you **`emit`** named events (publish) and **`on`** listen for them (subscribe). Same idea as browser `addEventListener`, but for your own custom events. Node's core objects ARE emitters (`server.on("request")`, `stream.on("data")`, `process.on("exit")`).
+
+### ⭐ Q: Basic syntax?
+```js
+import { EventEmitter } from "events"; // built-in, no install
+const emitter = new EventEmitter();
+
+emitter.on("greet", (name) => console.log(`Hello, ${name}!`)); // SUBSCRIBE
+emitter.emit("greet", "Aditya");                               // PUBLISH → "Hello, Aditya!"
+```
+
+### Q: Key methods
+```js
+emitter.on("e", fn);       // subscribe — runs EVERY time e fires
+emitter.once("e", fn);     // subscribe — runs ONLY the first time (auto-removes after)
+emitter.emit("e", data);   // fire the event, pass data to listeners
+emitter.off("e", fn);      // unsubscribe (needs the SAME fn reference)
+emitter.listenerCount("e");// how many listeners
+```
+
+### ⭐ Q: Multiple listeners on one event?
+Register many listeners on the **same event name** → one `emit` runs them **all, in registration order**. That's the point of pub/sub: one event → many reactions.
+```js
+bus.on("userRegistered", (n) => console.log(`Welcome email to ${n}`));
+bus.on("userRegistered", (n) => console.log(`Admin notified: ${n}`));
+bus.emit("userRegistered", "xyz"); // BOTH run
+```
+
+### ⚠️ GOTCHAS (I hit all three)
+1. **`.on`/`.once` need a FUNCTION; `.emit` takes DATA.** Don't confuse subscribing with firing. `once("e", "xyz")` → `TypeError: listener must be a function`.
+2. **`.off` needs the EXACT same function reference** — inline anonymous functions can't be removed. Save the listener in a variable to remove it later.
+3. **Different event names ≠ multiple listeners.** For "many reactions to one event," all listeners must use the **same** event name.
+
+### ⭐ Q: Is `emit` sync or async?
+**Synchronous** — listeners run immediately on the call stack (not deferred like setTimeout). Also: the **listener must be registered BEFORE `emit`**, or the event is missed. (This is why libraries defer emits with `process.nextTick` — see §3c.)
