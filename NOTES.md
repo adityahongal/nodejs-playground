@@ -556,3 +556,94 @@ bus.emit("userRegistered", "xyz"); // BOTH run
 
 ### ⭐ Q: Is `emit` sync or async?
 **Synchronous** — listeners run immediately on the call stack (not deferred like setTimeout). Also: the **listener must be registered BEFORE `emit`**, or the event is missed. (This is why libraries defer emits with `process.nextTick` — see §3c.)
+
+---
+
+## 11. Express & REST APIs (⭐ core — this is the job)
+
+### ⭐ Q: What is a REST API?
+An architectural **style** (not a protocol) for designing web APIs. Rules: expose **resources** via URLs (nouns), act on them with **HTTP methods** (verbs), be **stateless**, use **JSON** + proper **status codes**.
+- Resource URLs use nouns: `GET /users/5` ✅, not `GET /getUser?id=5` ❌.
+- The URL names the *thing*; the method says what to *do*.
+- **Stateless** = each request carries everything the server needs (e.g. auth token); server stores no session between requests → scalable.
+
+### ⭐ Q: What is Express? Why use it over raw `http`?
+A minimal web framework on top of Node's `http`. Gives clean **routing**, **middleware**, and helpers (`res.json`, `req.params`, `req.body`) — no manual `req.url` branching or `res.end` juggling.
+```js
+import express from "express";
+const app = express();
+app.get("/path", (req, res) => res.json({ ok: true }));
+app.listen(3000, () => console.log("up"));
+```
+
+### ⭐ Q: What is middleware?
+A function that runs **between** the request arriving and your route handler — it can read/modify `req`/`res`, then call `next()` to pass control on.
+```
+Request → [middleware] → [middleware] → route handler → Response
+```
+`app.use(fn)` runs `fn` for all routes. Examples: body parsing, auth checks, logging, CORS.
+
+### ⭐ Q: Why `app.use(express.json())`?
+Built-in middleware that reads the incoming JSON **string** body and `JSON.parse()`s it onto **`req.body`**. Without it, `req.body` is `undefined` on POST/PUT (the #1 beginner bug).
+
+### ⭐ Q: How does JSON.parse/stringify relate to Express?
+HTTP only sends **text (strings)**. Express converts for you:
+| Direction | Raw way | Express way |
+|---|---|---|
+| Incoming | `JSON.parse(body)` | `express.json()` → `req.body` |
+| Outgoing | `res.end(JSON.stringify(obj))` | `res.json(obj)` |
+
+### ⭐ Q: Route params vs body?
+- **Route param** `:id` → `req.params.id` (from the URL, always a **string** → `Number(...)` to compare).
+- **Body** → `req.body` (the JSON the client sent, parsed by `express.json()`).
+
+### ⭐ Q: `res.status()` vs `res.json()`/`res.send()`?
+- `res.status(code)` — sets the status code ONLY (sends nothing); returns `res` so you can chain.
+- `res.json(obj)` — sends JSON body (default 200). `res.send()` — sends text/html/etc.
+- Combine: `res.status(201).json(newItem)`.
+
+### The 5 CRUD endpoints (the pattern)
+```js
+app.use(express.json());
+let items = [ /* in-memory array — resets on restart! */ ];
+
+app.get("/api/items", (req, res) => res.json(items));                 // list → 200
+
+app.get("/api/items/:id", (req, res) => {                             // one → 200/404
+  const item = items.find(x => x.id === Number(req.params.id));
+  if (!item) return res.status(404).json({ message: "not found" });
+  res.json(item);
+});
+
+app.post("/api/items", (req, res) => {                                // create → 201
+  const item = { id: items.length + 1, ...req.body };
+  items.push(item);
+  res.status(201).json(item);
+});
+
+app.put("/api/items/:id", (req, res) => {                             // update → 200/404
+  const item = items.find(x => x.id === Number(req.params.id));
+  if (!item) return res.status(404).json({ message: "not found" });
+  item.name = req.body.name || item.name;   // keep old if not provided
+  res.json(item);
+});
+
+app.delete("/api/items/:id", (req, res) => {                          // delete → 204/404
+  const exists = items.find(x => x.id === Number(req.params.id));
+  if (!exists) return res.status(404).json({ message: "not found" });
+  items = items.filter(x => x.id !== Number(req.params.id));
+  res.status(204).send();
+});
+```
+
+### ⚠️ CAVEATS (I hit these)
+- **One response per request.** `res.json/send/end` all END the response — call one, once. A second send → `ERR_HTTP_HEADERS_SENT`.
+- **Guard clauses MUST `return`** — `if (!found) return res.status(404)...` — else the code below runs and sends a 2nd response (crash).
+- **`req.params.id` is a string** — convert with `Number()`.
+- **In-memory arrays are temporary** — wiped on restart. Real persistence = a database (MongoDB next).
+
+### Status codes for CRUD
+`200` OK (get/update) · `201` Created (post) · `204` No Content (delete) · `404` Not Found · `400` Bad Request · `500` Server Error.
+
+### Testing (see `07-REST-API/README.md` for full curl commands)
+GET → browser or curl. POST/PUT/DELETE → curl with `-X METHOD -H "Content-Type: application/json" -d '{...}'`, or Postman / VS Code REST Client.
