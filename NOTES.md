@@ -647,3 +647,65 @@ app.delete("/api/items/:id", (req, res) => {                          // delete 
 
 ### Testing (see `07-REST-API/README.md` for full curl commands)
 GET → browser or curl. POST/PUT/DELETE → curl with `-X METHOD -H "Content-Type: application/json" -d '{...}'`, or Postman / VS Code REST Client.
+
+### ⭐ Q: What is CORS? (deferred coding until React connects)
+**Cross-Origin Resource Sharing** — a **browser** security mechanism controlling whether a page from one **origin** can call an API on a different origin. Origin = protocol + domain + **port** (so `localhost:3000` → `localhost:3030` is cross-origin). By default the browser's **Same-Origin Policy** blocks cross-origin requests unless the server allows them via CORS headers.
+- 🔴 **Only the browser enforces CORS.** `curl`/Postman/server-to-server have NO CORS — that's why curl tests never hit it.
+- **The error** (browser console): `blocked by CORS policy: No 'Access-Control-Allow-Origin' header`. Means: server didn't say your origin is allowed.
+- **Behind the scenes:** server sends `Access-Control-Allow-Origin: <origin>` header. Non-simple requests (PUT/DELETE, JSON POST) trigger a **preflight**: browser auto-sends an `OPTIONS` request first to ask permission, then sends the real request only if approved.
+- **Fix (Express):** `import cors from "cors"; app.use(cors());` (or `cors({ origin: "http://localhost:3000" })`) — it's middleware that adds the headers + handles preflight.
+- **Interview traps:** browser enforces / server configures; Postman works because it's not a browser; preflight = the `OPTIONS` check; CORS protects the **user**, not the server.
+
+---
+
+## 12. MVC Structure in Express (⭐ how real apps are organized)
+
+### ⭐ Q: What is MVC?
+A way to organize code by **responsibility** so each file has one job. Layers:
+- **Model** — the data + how to access it (an array now → a Mongoose model later)
+- **View** — the UI (in a REST API this is just JSON / the React frontend)
+- **Controller** — the logic: what to do with data (find/create/update/delete functions)
+- **Routes** (Express addition) — map HTTP method + URL → controller function
+
+**Flow:** `Request → Route → Controller → Model → (controller sends response back)`
+
+### Q: Why MVC? (interview answer)
+Separation of concerns → easier to read/test/change; scales (50 routes stay manageable); reusable logic; team-friendly. `index.js` becomes tiny (setup only).
+
+### Q: Folder structure
+```
+models/applicationModel.js        // the data
+controllers/applicationController.js  // export const getAll = (req,res)=>{...}  (the logic)
+routes/applicationRoutes.js       // router.get("/", getAll) ...
+index.js                          // create app, middleware, MOUNT routes, listen
+```
+
+### ⭐ Q: What is `express.Router()` and "mounting"?
+`express.Router()` = a mini-app holding routes in their own file. Routes use paths **relative to the mount point** (`/`, `/:id` — NOT the full path).
+```js
+// routes file — pass the function REFERENCE (no parentheses)
+const router = express.Router();
+router.get("/", getAllApplications);
+router.get("/:id", getApplicationById);
+export default router;
+
+// index.js — MOUNT it at a base path
+app.use(express.json());                          // middleware lives at app level
+app.use("/api/applications", router);             // router path "/" → GET /api/applications
+```
+**Mounting** = attaching the router at a base path; that prefix is prepended to every router path. Base path written **once** → change it in one place. (A router is just middleware that contains routes.)
+
+### ⚠️ CAVEAT: mutate vs reassign shared data across modules (why DELETE uses `.splice`, not `.filter`)
+When the model does `export default applications` and a controller imports it, **both point to the SAME array** (same address in memory).
+- **Mutating** (`.push()`, `.splice()`) changes that shared array → visible everywhere. ✅
+- **Reassigning** (`applications = applications.filter(...)`) makes a NEW array and points only the local variable at it → the model still points to the old one, out of sync. ❌ AND imported bindings are **read-only** in ESM → `applications = ...` throws `Assignment to constant variable`.
+- **So DELETE uses `findIndex` + `splice` (mutate in place):**
+  ```js
+  const index = applications.findIndex(x => x.id === id);  // -1 if not found
+  if (index === -1) return res.status(404).json({ message: "not found" });
+  applications.splice(index, 1);   // MUTATES the shared array — works across files
+  ```
+- Rule: **across modules, mutate shared data — don't reassign it.** (This whole problem disappears with a real DB — MongoDB owns the data, not a JS variable.)
+
+### Note: ESM import paths
+Relative imports need `./` or `../` AND the **`.js` extension** (`"../models/applicationModel.js"`). CommonJS auto-adds `.js`; ESM does not → `Cannot find module` if omitted.
