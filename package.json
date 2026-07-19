@@ -19,6 +19,8 @@
   },
   "homepage": "https://github.com/adityahongal/nodejs-playground#readme",
   "dependencies": {
-    "express": "^4.22.2"
+    "dotenv": "^17.4.2",
+    "express": "^4.22.2",
+    "mongoose": "^9.7.4"
   }
 }

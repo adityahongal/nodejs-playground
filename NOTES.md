@@ -709,3 +709,106 @@ When the model does `export default applications` and a controller imports it, *
 
 ### Note: ESM import paths
 Relative imports need `./` or `../` AND the **`.js` extension** (`"../models/applicationModel.js"`). CommonJS auto-adds `.js`; ESM does not → `Cannot find module` if omitted.
+
+---
+
+## 13. MongoDB + Mongoose (⭐ making data persist) — `09-MongoDB-Mongoose`
+
+The in-memory array (`08`) reset on every restart. Swapped it for **MongoDB** (a cloud database) so data survives. `08` = in-memory version, `09` = persistent version (same API, different data layer).
+
+### ⭐ Q: SQL vs NoSQL? (and where Mongo/Postgres fit)
+- **SQL / relational** (PostgreSQL, MySQL, SQLite): data in **tables** (rows/columns), rigid **schema** defined up front, tables linked by IDs, stitched with **JOINs**, queried in **SQL**. Great when data is relational + correctness is critical (banking).
+- **NoSQL / document** (MongoDB): data as flexible **JSON-like documents**, no rigid schema, related data **nested** inside one doc. Great when data is document-shaped + evolving.
+- **SQL is a *language*, not a database.** SQLite = a SQL DB that's just a single file (no server).
+
+### ⭐ Q: Why MongoDB for this project?
+1. It's the **M in MERN** (my portfolio/interview goal).
+2. Documents **are** JSON → maps 1:1 to my JS objects, no table/JOIN translation.
+3. Flexible while the schema is still changing.
+4. **Atlas** free tier = cloud-hosted, no local install.
+- **Senior answer:** *"It depends on data shape + access pattern. For relational, transaction-heavy data I'd pick Postgres; for document-shaped, evolving data, Mongo. Here it's a MERN app with document-shaped job applications, so Mongo."* (Nuance: Postgres now has JSONB, Mongo now has transactions — the old "fast vs safe" framing is outdated.)
+
+### ⭐ Q: What is Mongoose? (vs MongoDB)
+- **MongoDB** = the database (the warehouse). It's schema-*less* — will store any junk.
+- **Mongoose** = an npm library between my code and Mongo (the front-desk clerk). Adds back **Schemas** (enforce a shape), **validation**, and clean methods (`.find()`, `.create()`).
+- Stack: **Express → Mongoose → MongoDB**.
+
+### ⭐ Q: Schema vs Model? (the key distinction)
+- **Schema = the blueprint / description.** Inert. Just describes fields, types, rules. Can't touch the DB — there's no `schema.find()`.
+- **Model = a live, DB-connected tool built from the schema.** *This* is what has `.find()`, `.create()`, etc.
+- `mongoose.model("Application", schema)` is a **factory**: hand it a schema → get back a Model (like a JS class). Analogy: Schema = form template, Model = the clerk who owns the filing cabinet.
+```js
+const applicationSchema = new mongoose.Schema({
+  company: { type: String, required: true },
+  role:    { type: String, required: true },
+  status:  { type: String, enum: ["applied","interview","offer","rejected","pending"], default: "applied" },
+}, { timestamps: true });          // auto createdAt + updatedAt on every doc
+
+const Application = mongoose.model("Application", applicationSchema);
+export default Application;
+```
+- **Schema options:** `required` (reject save if missing), `enum` (only these values — typo-proof), `default` (auto-fill), `{ timestamps: true }` (free `createdAt`/`updatedAt`).
+- **`mongoose.model("Application", ...)`** → Mongoose **lowercases + pluralizes** the name → documents live in the **`applications`** collection. Model name is Capitalized + singular; the string decides the collection, the variable is my handle.
+- **No manual `id`!** Mongo auto-generates a unique **`_id`** (an ObjectId, a *string* not a number) on every doc.
+
+### Environment variables (secrets)
+- **Never hardcode the DB password in code** — bots scrape GitHub and hijack DBs in minutes.
+- Secrets live in a **git-ignored `.env`** file; code reads them via `process.env.X`.
+- **`process.env`** = an object on the global `process` of all environment variables. My `MONGO_URI` isn't there by default — **dotenv** reads `.env` and injects it. Chain: `.env → dotenv → process.env → code`.
+- `import "dotenv/config"` must be the **first import** (must run before anything reads `process.env`).
+- **`process.exit(1)`** = kill the program now; the number is the **exit code** (`0` = success, non-zero = error) that tools (CI/Docker/deploy) read. Exit on DB-connect failure → **fail fast, fail loud** instead of limping.
+
+### The connection
+```js
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI);   // network I/O → await
+    console.log("MongoDB connected");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);          // DB unreachable → API is useless → crash on startup
+  }
+};
+```
+- Connection string: `mongodb+srv://user:PASS@host/DBNAME?retryWrites=true&w=majority`. The **`/DBNAME`** (`jobtracker`) names the DB; without it you land in `test`.
+- Mongoose v9: **no** `useNewUrlParser`/`useUnifiedTopology` (removed years ago — ignore old tutorials).
+
+### ⭐ Q: Why does "server running" print BEFORE "MongoDB connected"?
+`connectDB()` is called first but I **don't `await`** it → it hits `await mongoose.connect` (slow *network* I/O), **leaves the call stack**, returns a pending promise immediately. Code continues to `app.listen()` — binding a **local** port is fast → prints first. ~100ms later Atlas replies, `connectDB` **resumes as a microtask** → prints second.
+- **Lesson:** calling an async fn doesn't pause your code — code *order* ≠ completion *order* once async I/O is involved. (Same truth as `setTimeout`/thread-pool experiments.)
+- To force DB-first: `connectDB().then(() => app.listen(...))`.
+
+### Controllers: array ops → Model methods (all async now)
+Every controller is now **`async` + `try/catch` + `await Application.method()`** (there's a network round-trip).
+| Op | OLD (array) | NEW (Model) |
+|----|-------------|-------------|
+| getAll | `applications` | `await Application.find()` |
+| getById | `.find(x=>x.id===id)` | `await Application.findById(req.params.id)` |
+| create | `.push()` | `await Application.create(req.body)` |
+| update | find + reassign fields | `await Application.findByIdAndUpdate(id, req.body, { new: true, runValidators: true })` |
+| delete | `.findIndex` + `.splice` | `await Application.findByIdAndDelete(req.params.id)` |
+- **`findByIdAndUpdate` options:** `new: true` → return the **updated** doc (default returns the *stale* one — classic gotcha); `runValidators: true` → re-check schema rules on update (skipped by default).
+- **Pass `req.params.id` as-is** — do NOT `Number()` it; Mongo `_id`s are ObjectId strings, not numbers.
+- **`create(req.body)`** — no manual object-building, no manual `id`; Mongoose validates + generates `_id`.
+
+### ⭐ Q: Where does 404 belong? (404 vs 500 vs the catch)
+- **`catch` = *unexpected failures*** (DB down, bad data) → **500** (server error).
+- **"Not found" is NOT an error.** A query for a missing id **succeeds and returns `null`** — never throws, never reaches `catch`. So 404 lives in an explicit **null-guard**, not the catch:
+```js
+const application = await Application.findById(req.params.id);
+if (!application) {
+  return res.status(404).json({ message: "application not found" });  // ← 404 HERE (query worked, found nothing)
+}
+res.json(application);
+// catch → res.status(500)   (something actually broke)
+```
+
+### ⚠️ CAVEATS (I hit these)
+- **Guard clauses must `return`** — else after the 404 response, code continues to `res.json()` → sends a 2nd response → `ERR_HTTP_HEADERS_SENT`. (Same lesson from `07`.)
+- **Match the catch param name** — `catch (error) { ... err.message }` → `err` is undefined → ReferenceError inside the catch. Keep `error`/`error` consistent.
+- **`id` is undefined** if you forget `req.params.` — use `req.params.id`, not a bare `id`.
+- **A promise signals failure by *throwing*, not by returning falsy** — so `if(!result)` after `await` doesn't catch DB errors; that's what `try/catch` is for. `if(!result)` only catches the legit "found nothing / null" case.
+- **`EADDRINUSE`** — old server still on port 3030. Kill it: `lsof -ti :3030 | xargs kill -9`.
+
+### Persistence proof (the whole point)
+Create docs → `Ctrl+C` the server → restart → `GET all` → **data still there.** With `08`'s array, restart wiped everything. Now MongoDB owns the data, not a JS variable. Verified: schema validation rejects a doc missing `role` (`Application validation failed: role: Path 'role' is required`), 404 guards fire, `204` on delete, `_id`/`status` default/`timestamps` all auto-populate. Data visible in **Atlas → Browse Collections → `jobtracker` → `applications`**.
