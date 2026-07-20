@@ -812,3 +812,107 @@ res.json(application);
 
 ### Persistence proof (the whole point)
 Create docs → `Ctrl+C` the server → restart → `GET all` → **data still there.** With `08`'s array, restart wiped everything. Now MongoDB owns the data, not a JS variable. Verified: schema validation rejects a doc missing `role` (`Application validation failed: role: Path 'role' is required`), 404 guards fire, `204` on delete, `_id`/`status` default/`timestamps` all auto-populate. Data visible in **Atlas → Browse Collections → `jobtracker` → `applications`**.
+
+---
+
+## 14. Auth — JWT + bcrypt (⭐ login, protected routes, per-user data) — `10-Auth-JWT`
+
+Gave the Job Tracker real accounts: sign up, log in, and each user sees ONLY their own applications. Packages added: **`bcryptjs`** (hash passwords), **`jsonwebtoken`** (JWTs).
+
+### ⭐ Q: Authentication vs Authorization?
+- **Authentication (authN) = "who are you?"** → login, prove identity (`protect` middleware checks the token).
+- **Authorization (authZ) = "what are you allowed to do?"** → can THIS user touch THIS record (owner scoping).
+- Being logged in ≠ allowed to touch anyone's data. Need both.
+
+### ⭐ Q: Hashing vs encryption? What is a salt? The cost factor?
+- **Hashing is ONE-WAY** — `"secret123"` → `$2a$10$...60chars`, can NEVER be reversed. (Encryption is two-way.) So even a DB leak doesn't expose passwords; that's why "forgot password" always *resets*, never *retrieves*.
+- **Login check:** hash the attempt and compare hashes — never compare plain text.
+- **Salt** = random data mixed in so two users with the same password get DIFFERENT hashes (defeats rainbow tables). `bcrypt.genSalt(10)`.
+- **The `10` = COST / WORK FACTOR** (2^10 = 1024 rounds), NOT salt length. Higher = slower = harder to brute-force. The salt (always 22 chars) is stored INSIDE the hash string, so `bcrypt.compare(plain, hash)` extracts it — no separate salt needed.
+
+### bcrypt in the User model (hash on save, compare on login)
+```js
+// pre-save hook — auto-hash before every save
+// ⚠️ Mongoose 7+ : async hook does NOT receive `next`. `return` to skip, let it resolve to proceed.
+userSchema.pre("save", async function () {         // regular function → `this` = the document
+  if (!this.isModified("password")) return;        // skip if pw unchanged (else you'd hash the hash!)
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+});
+// instance method — call on a user DOCUMENT at login
+userSchema.methods.matchPassword = async function (entered) {
+  return await bcrypt.compare(entered, this.password);  // this.password = stored hash loaded from DB
+};
+```
+- **Auto-hash via pre-save hook** = controllers never worry about it; you can't *forget* to hash.
+- ⚠️ **Hooks & methods must be registered BEFORE `mongoose.model()`** — Mongoose compiles the model at that call; anything added after is silently ignored (pw saved in plain text!). Order: schema → hooks/methods → `mongoose.model()` → export.
+- ⚠️ **Mongoose 7+ async hooks: no `next`.** Old tutorials pass/call `next` (Mongoose ≤6) → `"next is not a function"`. Know your version.
+
+### ⭐ Q: If passwords are hashed, why JWT? Doesn't it add latency?
+Different problems. Hashing protects passwords AT REST. JWT answers *"on the NEXT request, how does the server know I'm logged in?"* — because **HTTP is stateless** (server forgets you after each request). Without a token you'd send the password on EVERY request AND run slow bcrypt each time. So JWT REDUCES latency: pay bcrypt ONCE at login, then every later request is a fast signature check.
+> **bcrypt = prove who you are once (slow, at login). JWT = remember you proved it (fast, every request after).**
+
+### JWT: sign (login) ↔ verify (middleware) — two ends of one secret
+```js
+// utils/generateToken.js — at login
+jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
+// middleware — on protected requests
+const decoded = jwt.verify(token, process.env.JWT_SECRET);   // → { id, iat, exp }
+```
+- **Payload = ONLY the user's `_id`.** A JWT is **signed, not encrypted** — anyone can decode & READ the payload (paste into jwt.io). Signing prevents FORGERY, not reading. So: id only, never password.
+- **Same `JWT_SECRET` signs AND verifies** — it's the "venue stamp." Tamper with the token → signature won't match → `verify` throws → 401. Secret lives in `.env` (git-ignored); if it leaks, anyone can forge logins.
+
+### ⭐ Q: Token expiry & refresh? Multi-device?
+- **Expired token** → `jwt.verify` throws `TokenExpiredError` → 401 → user logs in again. Our setup = single token, `7d`.
+- **Auto-refresh (v2, not built):** access token (short, ~15min) + refresh token (long, ~30d) → client silently swaps expired access token for a new one via `/refresh`; only re-enter password when the refresh token expires.
+- **Multi-device:** each login mints a NEW token; the SERVER stores nothing (stateless) — it just verifies any valid signed+unexpired token. So many devices = many valid tokens at once. Tradeoff: can't easily revoke one token server-side (valid until expiry).
+
+### The `protect` middleware (the gatekeeper)
+```js
+export const protect = async (req, res, next) => {
+  try {
+    let token;
+    if (req.headers.authorization?.startsWith("Bearer")) {
+      token = req.headers.authorization.split(" ")[1];   // "Bearer abc" → "abc"
+    }
+    if (!token) return res.status(401).json({ message: "Not authorized, no token" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = await User.findById(decoded.id).select("-password");  // attach user (no pw)
+    next();
+  } catch (error) {
+    return res.status(401).json({ message: "Not authorized, token failed" });
+  }
+};
+```
+- **`Authorization: Bearer <token>`** = scheme word + space + token → `.split(" ")[1]` keeps just the token (`jwt.verify` wants the token alone, not "Bearer").
+- **Why attach `req.user`?** The token holds only an `id`; the real user lives in the DB. Middleware looks it up ONCE and hangs it on `req` (a tray passed down the pipeline) so every handler reuses `req.user` instead of re-decoding + re-querying.
+- ⚠️ **Express middleware DOES use `next()`** (contrast: Mongoose 7+ async hooks don't). Two different worlds.
+- `router.use(protect)` in the routes file guards EVERY route below it at once.
+
+### Where data lives (two storage locations)
+- **Server (MongoDB, permanent):** the user record `{ name, email, password:<hash> }` + applications. This IS the "login data."
+- **Client (browser, temporary):** the token. Server stores NO session — it re-derives identity from the token each request (stateless).
+
+### ⭐ Q: authZ — owner scoping & IDOR (the security bug we prevented)
+Without scoping, a logged-in user could `GET/DELETE /api/applications/<someone else's id>` and touch data that isn't theirs = **IDOR (Insecure Direct Object Reference)**. Fix: every query is scoped to `req.user._id`.
+```js
+create: Application.create({ ...req.body, owner: req.user._id })          // STAMP owner (after spread → yours wins)
+getAll: Application.find({ owner: req.user._id })                          // FILTER by owner
+getOne: Application.findOne({ _id: req.params.id, owner: req.user._id })   // findById → findOne (match BOTH)
+update: Application.findOneAndUpdate({ _id, owner: req.user._id }, req.body, { new: true, runValidators: true })
+delete: Application.findOneAndDelete({ _id, owner: req.user._id })
+```
+- Matching `_id` **AND** `owner` in one query does the lookup + ownership check together. Not yours → returns `null` → existing 404 guard fires (they can't even tell it exists).
+- Optional hardening: whitelist update fields (`const { company, role, status } = req.body`) so a user can't mass-assign `owner` and give an app away.
+
+### ⭐ Q: `owner` field — ObjectId, ref, and PK/FK
+```js
+owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }
+```
+- Every document (User AND Application) gets its OWN auto-generated `_id`. `owner` does NOT generate a new id — it stores a **COPY of the User's existing `_id`** as a LINK (a foreign key).
+- **`type: ObjectId`** = the field holds a value shaped like an id (same type as `_id`). **`ref: "User"`** = names the collection that id points to → enables `.populate("owner")` to swap the id for the full user doc.
+- **Primary key (PK)** = unique id per record (identity, never repeats) = `_id`. **Foreign key (FK)** = stores another record's PK to link them (CAN repeat).
+- **One-to-many:** one User → many Applications. Each app has its own unique PK (`_id`), but they SHARE the same FK (`owner` = that user's id). PKs never collide; FKs are meant to repeat — that repetition IS the relationship. (SQL parallel: `applications.user_id` → `users.id`; Mongo stores a reference instead of doing a JOIN.)
+
+### Security tested (two users)
+Registered Alice + Bob, each created an app. Verified: no token → 401; Alice's `GET all` shows only hers, Bob's only his; Bob `GET`/`DELETE` Alice's app by id → **404 (IDOR blocked)**; Alice's app survives. authN (`protect`) + authZ (owner scoping) both working.

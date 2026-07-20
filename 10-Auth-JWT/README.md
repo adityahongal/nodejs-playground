@@ -1,84 +1,83 @@
-# 09 — MongoDB + Mongoose (persistent data)
+# 10 — Auth: JWT + bcrypt (accounts + protected, per-user data)
 
-Same CRUD API as `08-MVC-Patterns`, but the in-memory array is replaced with a real
-**MongoDB** database (via **Mongoose**). Data now **survives server restarts**.
+Builds on `09-MongoDB-Mongoose`. Adds **user accounts**: sign up, log in, and each user
+sees/modifies **only their own** applications. Two new packages: **`bcryptjs`** (hash
+passwords) + **`jsonwebtoken`** (JWTs).
 
-`08` = in-memory version (resets on restart) · `09` = persistent version (this folder).
+`09` = open API (anyone can hit it) · `10` = protected API (login required, data scoped to owner).
 
-## Structure
+## What's new vs 09
 
 ```
-09-MongoDB-Mongoose/
-├── index.js                              entry: dotenv → connectDB() → app + middleware + router + listen
-├── config/db.js                          connectDB() — mongoose.connect(process.env.MONGO_URI)
-├── models/applicationModel.js            Mongoose Schema + Model (the ONLY layer that talks to Mongo)
-├── controllers/applicationController.js  5 async controllers (find / findById / create / findByIdAndUpdate / findByIdAndDelete)
-└── routes/applicationRoutes.js           method + path → controller
+10-Auth-JWT/
+├── models/userModel.js            NEW — User schema; bcrypt pre-save hash + matchPassword method
+├── models/applicationModel.js     + owner field (ObjectId ref → User) = foreign key
+├── controllers/authController.js  NEW — registerUser + loginUser (issue JWT)
+├── controllers/applicationController.js  all 5 fns scoped to req.user._id (authZ)
+├── routes/authRoutes.js           NEW — POST /register, /login (mounted at /api/auth)
+├── routes/applicationRoutes.js    + router.use(protect) — every route needs a valid token
+├── middleware/authMiddleware.js   NEW — protect: verify JWT → attach req.user
+├── utils/generateToken.js         NEW — jwt.sign({ id }, JWT_SECRET, { expiresIn })
+└── index.js                       mounts BOTH routers (/api/applications + /api/auth)
 ```
-
-**Request flow:** `Request → routes → controller → Model → MongoDB Atlas → response`
 
 ## Key ideas
-- **Schema = blueprint (inert)**, **Model = live DB-connected tool** (`.find()`, `.create()`…). `mongoose.model("Application", schema)` compiles one into the other; docs land in the pluralized **`applications`** collection.
-- Schema enforces shape MongoDB alone won't: `required`, `enum`, `default`, `{ timestamps: true }` (auto `createdAt`/`updatedAt`). Mongo auto-adds a unique **`_id`** (ObjectId string — no manual id).
-- Every controller is **`async` + `try/catch` + `await Application.…()`** (DB access is network I/O).
-- **404 = a null-guard** (query succeeded, found nothing), **500 = the catch** (something broke). Guard clauses must `return`.
-- `findByIdAndUpdate(id, req.body, { new: true, runValidators: true })` — return the *updated* doc + re-run validation.
+- **authN vs authZ:** `protect` middleware = "are you logged in?" (token). Owner scoping = "is this row yours?".
+- **bcrypt:** one-way hashing + salt; `genSalt(10)` → `10` is the cost/work factor, not salt length. Hash on register (pre-save hook), `bcrypt.compare` on login.
+- ⚠️ **Mongoose gotchas:** register hooks/methods BEFORE `mongoose.model()`; Mongoose 7+ async hooks take **no `next`** (`return` to skip, resolve to proceed).
+- **JWT:** signed (not encrypted) → payload holds only the user `_id`; same `JWT_SECRET` signs + verifies. Server is stateless (stores no token).
+- **owner = foreign key:** `{ type: ObjectId, ref: "User" }` stores a copy of the User's `_id`. Queries scoped with `findOne({ _id, owner: req.user._id })` prevent **IDOR** (touching others' data).
 
-## Setup (one-time)
-1. Create a free **MongoDB Atlas** cluster + DB user; allow network access.
-2. `npm install mongoose dotenv` (already in the shared root `package.json`).
-3. Create a **git-ignored `.env`** at the repo root:
+## Setup
+1. `npm install bcryptjs jsonwebtoken` (already in the shared root `package.json`).
+2. Add to the git-ignored root `.env` (alongside `MONGO_URI`):
    ```
-   MONGO_URI=mongodb+srv://<user>:<password>@<host>/jobtracker?retryWrites=true&w=majority
+   JWT_SECRET=<a long random string>
+   JWT_EXPIRES_IN=7d
    ```
-   ⚠️ Never commit `.env` — it holds the DB password.
+   ⚠️ If `JWT_SECRET` leaks, anyone can forge tokens. Never commit `.env`.
 
-## Run it (from the repo root, so dotenv finds the root `.env`)
-
+## Run it (from the repo root)
 ```bash
-node 09-MongoDB-Mongoose/index.js
-# → MVC API running on http://localhost:3030/api/applications
+node 10-Auth-JWT/index.js
+# → API running on http://localhost:3030
 # → MongoDB connected successfully
 ```
-Leave it running; `Ctrl+C` to stop. Data lives in Atlas → **persists across restarts**.
 
 ## Test with curl (second terminal)
-
 ```bash
-BASE=http://localhost:3030/api/applications
+API=http://localhost:3030/api
 
-# GET all
-curl $BASE
+# 1. REGISTER → 201 + token
+curl -s -X POST $API/auth/register -H "Content-Type: application/json" \
+  -d '{"name":"Alice","email":"alice@t.com","password":"secret123"}'
 
-# POST — create (201). No id/status needed → Mongoose fills _id, status:"applied", timestamps
-curl -X POST $BASE -H "Content-Type: application/json" \
-  -d '{"company":"Google","role":"Frontend Developer"}'
+# 2. LOGIN → 200 + token   (copy the token string)
+curl -s -X POST $API/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"alice@t.com","password":"secret123"}'
+TOKEN=<paste-token-here>
 
-# copy an _id from the output, then:
-ID=<paste-_id-here>
+# 3. protected route WITHOUT token → 401
+curl -s $API/applications
 
-# GET one (200) / missing (404)
-curl $BASE/$ID
-curl $BASE/000000000000000000000000
+# 4. protected route WITH token → 200 (only YOUR apps)
+curl -s $API/applications -H "Authorization: Bearer $TOKEN"
 
-# PUT — update (200, returns the UPDATED doc thanks to new:true)
-curl -X PUT $BASE/$ID -H "Content-Type: application/json" -d '{"status":"interview"}'
-
-# schema validation — missing required field → 500 with a validation message
-curl -X POST $BASE -H "Content-Type: application/json" -d '{"company":"NoRole Inc"}'
-
-# DELETE — (204 No Content) / missing (404)
-curl -i -X DELETE $BASE/$ID
+# 5. create an application (owner auto-stamped from the token)
+curl -s -X POST $API/applications -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"company":"Google","role":"Frontend Developer"}'
 ```
 
-### Prove persistence 🏆
-Create a doc → `Ctrl+C` the server → restart → `curl $BASE` → **the data is still there.**
-(With `08`'s in-memory array it would have been wiped.) See it in the cloud at
-**Atlas → Browse Collections → `jobtracker` → `applications`**.
+### Prove the security 🔒
+Register a **second** user, have them create their own app, then try to `GET`/`DELETE`
+the **first** user's application id with the second user's token → you get **404**
+(IDOR blocked — you can only ever touch your own data). Verified via `scratchpad/sectest.mjs`
+during the build.
 
-### curl flags
-- `-X <METHOD>` — HTTP method (default GET)
-- `-H "Content-Type: application/json"` — header saying the body is JSON (triggers `express.json()`)
-- `-d '<json>'` — request body
-- `-i` — include response headers (handy for `204`, which has no body)
+### Endpoints
+| Method + path | Auth | Purpose |
+|---|---|---|
+| POST `/api/auth/register` | public | create account, returns token |
+| POST `/api/auth/login` | public | verify credentials, returns token |
+| GET/POST `/api/applications` | 🔒 token | list / create (scoped to you) |
+| GET/PUT/DELETE `/api/applications/:id` | 🔒 token | read / update / delete YOUR app only |

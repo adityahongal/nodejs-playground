@@ -6,6 +6,11 @@ import mongoose from "mongoose";
 // 1. The Schema - structure of the data made with mongoose
 const applicationSchema = new mongoose.Schema(
   {
+    owner: {
+    type: mongoose.Schema.Types.ObjectId,   // holds a User's _id (a reference)
+    ref: "User",                            // points to the User model
+    required: true,
+  },
     company: {
         type: String,
         required: true,

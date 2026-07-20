@@ -11,8 +11,11 @@ import {
   updateApplication,
   deleteApplication,
 } from "../controllers/applicationController.js"; // ensure .js is included else module not found error
+import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router(); // a mini Express app for routes
+
+router.use(protect);   // ← every application route below now requires a valid token - no application endpoint works without logging in
 
 // map method + path → controller function (NO (req,res) here — just pass the function reference)
 router.get("/", getAllApplications);                    // note: path is "/" not "/api/applications"

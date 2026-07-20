@@ -12,7 +12,7 @@ import Application from "../models/applicationModel.js"; // ensure .js extension
 // GET all
 export const getAllApplications = async (req, res) => {
   try {
-    const applications = await Application.find(); // Model → MongoDB → all docs
+    const applications = await Application.find({ owner: req.user._id })
     res.json(applications);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -22,7 +22,7 @@ export const getAllApplications = async (req, res) => {
 // GET by id
 export const getApplicationById = async (req, res) => {
   try {
-    const application = await Application.findById(req.params.id);
+    const application = await Application.findOne({ _id: req.params.id, owner: req.user._id }) ;
 
     if (!application) {
       // ← 404 lives HERE (query worked, found nothing)
@@ -39,7 +39,7 @@ export const getApplicationById = async (req, res) => {
 export const createApplication = async (req, res) => {
   try {
     // create() validates req.body against the schema + auto-generates _id (no manual id/object-building)
-    const application = await Application.create(req.body);
+    const application = await Application.create({ ...req.body, owner:req.user._id })
 
     res.status(201).json(application);
   } catch (error) {
@@ -50,11 +50,7 @@ export const createApplication = async (req, res) => {
 // PUT
 export const updateApplication = async (req, res) => {
   try {
-    const application = await Application.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }, // new:true → return UPDATED doc (default = stale); runValidators → re-check schema
-    );
+    const application = await Application.findOneAndUpdate({ _id: req.params.id, owner:req.user._id }, req.body, { new: true, runValidators: true })
 
     if(!application){
         return res.status(404).json({ message: "application not found" });
@@ -69,7 +65,7 @@ export const updateApplication = async (req, res) => {
 // DELETE
 export const deleteApplication = async (req, res) => {
   try {
-    const application = await Application.findByIdAndDelete(req.params.id);
+    const application = await Application.findOneAndDelete({ _id: req.params.id, owner:req.user._id })                                                       
 
     if(!application){
         return res.status(404).json({message: "application not found"})
