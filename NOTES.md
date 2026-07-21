@@ -916,3 +916,105 @@ owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }
 
 ### Security tested (two users)
 Registered Alice + Bob, each created an app. Verified: no token → 401; Alice's `GET all` shows only hers, Bob's only his; Bob `GET`/`DELETE` Alice's app by id → **404 (IDOR blocked)**; Alice's app survives. authN (`protect`) + authZ (owner scoping) both working.
+
+---
+
+## 15. Full-Stack Integration — React → API (⭐⭐ the MERN wiring) — *project: `Jobtracker-MERN` repo*
+
+Step 5 wires a **React frontend** to the Express+Mongo+JWT API. Code lives in a **separate portfolio repo** (`Jobtracker-MERN`, `client/` + `server/`), but the *concepts* below are prime interview material — kept here so all revision is in one place.
+
+### The setup: two servers, two origins
+- **Client:** React + Vite dev server on `http://localhost:5173`
+- **Server:** Express API on `http://localhost:3030`
+- They are **different origins** (port differs) → this is what triggers CORS.
+
+### ⭐⭐ Q: What is CORS? (KNOWN WEAK SPOT — know this cold)
+- **Same-Origin Policy (SOP):** browsers block JS on one **origin** from reading responses from a **different** origin, by default. Stops `evil.com` from calling `yourbank.com`'s API with your session.
+- **Origin = protocol + host + port** — all three must match. `localhost:5173` ≠ `localhost:3030` (port differs) → different origin.
+- **CORS (Cross-Origin Resource Sharing)** = the server's way to **opt in**: it sends the header `Access-Control-Allow-Origin: <origin>` and the browser then allows the JS to read the response. No header → blocked.
+- **⭐ THE key insight (interviewers probe this):** CORS is enforced by the **BROWSER, not the server.** The server actually receives + would process the request. That's why the SAME request **works in Postman/curl but fails in the browser** — curl doesn't enforce SOP.
+- **Preflight:** "non-simple" requests (POST with `Content-Type: application/json`, or a custom header like `Authorization`) make the browser send an **`OPTIONS` preflight FIRST** — "I'm from 5173, may I POST JSON with these headers?" Server must answer with CORS headers or the real request is never sent.
+- **The fix (Express):** `npm install cors` → `app.use(cors())` BEFORE routes (middleware order). Sends the `Access-Control-Allow-*` headers.
+  ```js
+  import cors from "cors";
+  app.use(cors());          // dev: allows all origins (*)
+  ```
+- **Production:** don't allow `*` — restrict to the real frontend URL: `cors({ origin: "https://myapp.com" })`.
+- **One-liner:** *"CORS isn't the server blocking me — it's the browser enforcing SOP, blocking my JS from reading a cross-origin response unless the server sends `Access-Control-Allow-Origin`. That's why it fails in the browser but works in Postman. Fix = `cors` middleware on the server."*
+
+### ⭐ Q: fetch vs axios? The `response.ok` gotcha
+- Used **`fetch`** (built-in, no dependency). Pattern:
+  ```js
+  const res = await fetch(url, { method, headers, body: JSON.stringify(data) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message);   // ← MUST do this
+  ```
+- **⭐ fetch does NOT reject on 4xx/5xx** — a 401/500 still "succeeds"; `fetch` only rejects on a **network failure**. So you must check **`response.ok`** (true for 200–299) and throw yourself. **axios auto-throws on non-2xx** — that's the main difference. (Also: `body` must be a **string** → `JSON.stringify`; set `Content-Type: application/json`.)
+
+### ⭐ Q: Where to store the JWT? (localStorage vs httpOnly cookie)
+- Used **`localStorage`** (`localStorage.setItem("token", data.token)`): simple, survives refresh, easy to attach.
+- ⚠️ **Tradeoff:** localStorage is readable by any JS on the page → vulnerable to **XSS**. More secure = **`httpOnly` cookie** (JS can't read it), but needs server cookie handling + **CSRF** protection.
+- **Senior answer:** *"localStorage for the MVP; for production I'd move to an httpOnly cookie to mitigate XSS, accepting the CSRF handling that comes with it."*
+
+### The full-stack auth flow (end to end)
+```
+SIGNUP/LOGIN → fetch POST /api/auth/* → server verifies → returns { token }
+             → client: localStorage.setItem("token", token)
+PROTECTED REQ → fetch with header:  Authorization: Bearer <token>
+             → protect middleware verifies → req.user → data scoped to owner
+```
+- The **`Authorization: Bearer <token>`** header the client sends is the EXACT shape the backend `protect` middleware parses (`.split(" ")[1]`). Frontend + backend are two halves of one contract.
+- Sending `Authorization` makes the request "non-simple" → **preflight** again (but `cors()` already allows it).
+
+### ⭐ Q: Protecting routes on the FRONTEND (`ProtectedRoute`) — and why it's not enough alone
+```jsx
+const ProtectedRoute = ({ children }) => {
+  const token = localStorage.getItem("token");
+  if (!token) return <Navigate to="/login" replace />;   // no key → bounce
+  return children;
+};
+```
+- Wrap protected routes: `<Route path="/" element={<ProtectedRoute><Dashboard/></ProtectedRoute>} />`.
+- `<Navigate replace />` = declarative redirect; `replace` avoids a broken Back-button loop.
+- **⚠️ Frontend guards are UX, NOT security.** `ProtectedRoute` only checks a token EXISTS — it can't tell if it's **expired** (only the server knows), and a user can bypass client code entirely. **Real security is the backend `protect` middleware.** Two complementary layers: ProtectedRoute (no token → redirect, before render) + a `try/catch` on the fetch (expired token → 401 → redirect).
+
+### The API-helper pattern (DRY)
+One `fetch` wrapper instead of repeating URL/token/headers everywhere:
+```js
+const BASE_URL = "http://localhost:3030/api";
+export const apiFetch = async (endpoint, options = {}) => {
+  const token = localStorage.getItem("token");
+  const res = await fetch(`${BASE_URL}${endpoint}`, {
+    ...options,
+    headers: { "Content-Type": "application/json",
+               ...(token && { Authorization: `Bearer ${token}` }),
+               ...options.headers },
+  });
+  if (res.status === 204) return null;          // DELETE has no body to parse
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || "Request failed");
+  return data;
+};
+```
+Centralizes base URL (kills path typos), token attach, error-check, and the **204 No Content** case (DELETE) — `res.json()` on an empty 204 body throws otherwise.
+
+### ⭐ Q: React state updates for CRUD (no refetch)
+- **Create:** `setApps(prev => [...prev, created])` — append.
+- **Update:** `setApps(prev => prev.map(a => a._id === id ? updated : a))` — swap the changed one.
+- **Delete:** `setApps(prev => prev.filter(a => a._id !== id))` — keep all except this id.
+- Pattern: **append / map-to-replace / filter-to-remove** → instant UI, no server round-trip.
+
+### ⭐⭐ Reading errors — the triage table (super useful debugging skill)
+| Browser error | Meaning | Fix |
+|---|---|---|
+| `...CORS policy... no 'Access-Control-Allow-Origin'` | Server UP, browser blocks cross-origin | `app.use(cors())` |
+| `404` + `Unexpected token '<' ... is not valid JSON` | Server UP, wrong URL → got HTML 404 page, `res.json()` chokes on `<!DOCTYPE` | fix the endpoint path |
+| `Failed to fetch` / `ERR_CONNECTION_REFUSED` (NO status code) | Server DOWN — nothing listening | start the server / check the port |
+- **Tell:** no HTTP status = server not reached (down/wrong port). A status (401/404) = server reached, logical issue.
+
+### Mongoose 9 note
+`findOneAndUpdate(..., { new: true })` is **deprecated** in Mongoose 9 → use **`{ returnDocument: "after" }`** (same meaning: return the updated doc). Old tutorials use `new: true`.
+
+### Frontend vs backend routing (recap)
+- **Backend routing** (Express): maps **HTTP method + path** → handler → returns data. Method-aware (GET/POST/PUT/DELETE differ).
+- **Frontend routing** (React Router): maps **URL path** → component → swaps the view, no server hit, no method. `useParams()` (FE) vs `req.params` (BE) — same `:id` idea, different sides.
