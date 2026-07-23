@@ -1018,3 +1018,122 @@ Centralizes base URL (kills path typos), token attach, error-check, and the **20
 ### Frontend vs backend routing (recap)
 - **Backend routing** (Express): maps **HTTP method + path** → handler → returns data. Method-aware (GET/POST/PUT/DELETE differ).
 - **Frontend routing** (React Router): maps **URL path** → component → swaps the view, no server hit, no method. `useParams()` (FE) vs `req.params` (BE) — same `:id` idea, different sides.
+
+---
+
+## 16. Observability — OpenTelemetry + Grafana (⭐⭐ traces/metrics/logs) — *project: `Jobtracker-MERN`*
+
+Added telemetry to the Job Tracker: see *inside* a running app. Stack: **OpenTelemetry** (instrument) → **otel-lgtm** Docker container (collect/store) → **Grafana** (visualize). Dogfooded on the real app; ended with one trace spanning **browser → Express → Mongo**.
+
+### ⭐ Q: What is observability? The 3 pillars
+Understanding a running system from the outside via:
+- **Traces** = one request's journey (a tree of **spans**) → *"why was THIS request slow?"* → **Tempo**
+- **Metrics** = numbers over time (counts, latency) → *"how many / how fast, overall?"* → **Mimir/Prometheus**
+- **Logs** = timestamped text events → *"what happened at 4:46?"* → **Loki**
+- Analogy: metric = a **tally clicker** at the door (counts everyone, no identity); trace = **CCTV of one customer**; log = the **diary**.
+
+### ⭐ Q: What is OpenTelemetry (OTel)? Why does it matter?
+- **Vendor-neutral standard** to *generate + export* telemetry. Instrument once → ship to ANY backend (Grafana, Datadog, New Relic…) without changing app code. That's the whole point: no lock-in.
+- **Span** = a unit of work (name + duration + attributes). **Trace** = spans linked by a trace id.
+- **Auto-instrumentation** = OTel patches libraries (http/express/mongoose) to emit spans automatically, zero app code. **Manual** = you create spans/metrics yourself with the OTel API.
+
+### Docker (just-enough)
+- **Image** = read-only blueprint (cookie cutter / class). **Container** = a running instance (cookie / object). `docker run <image>` pulls + starts one.
+- Commands: `docker run`, `docker ps` (`-a` = all), `docker logs <name>`, `docker stop <name>`.
+- **Port mapping `-p host:container`** punches a door in the sealed container (e.g. `-p 3000:3000` → reach Grafana at localhost:3000).
+- The lean setup = ONE image: `grafana/otel-lgtm` bundles OTel receiver + Loki/Grafana/Tempo/Mimir. `docker run --name lgtm -d -p 3000:3000 -p 4317:4317 -p 4318:4318 grafana/otel-lgtm`. Grafana admin/admin. Ports: 4317 OTLP-gRPC, 4318 OTLP-HTTP, 3000 Grafana, 3100 Loki, 3200 Tempo, 9090 Prometheus.
+- Docker at scale → needs an orchestrator (**Kubernetes** = runs thousands of containers across machines, self-heals, scales). Deploy platforms: Railway/Render (PaaS, easy) vs AWS (raw, control). Build tools (Vite/Parcel) run BEFORE Docker.
+
+### Where telemetry lives: app GENERATES, container COLLECTS
+Your app (backend+frontend) generates telemetry → ships it over the network (OTLP → :4318) → the container stores (Tempo/Mimir/Loki) + Grafana displays. Two separate places, network hop between. Data lives in the running CONTAINER (ephemeral — gone if removed, no volume). That separation is why you can swap the backend without touching the app.
+
+### Backend setup (Node, `server/instrumentation.js`)
+Two ways to load OTel before the app:
+- **Zero-code:** `node --import @opentelemetry/auto-instrumentations-node/register index.js` + env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_EXPORTER=otlp`…). Sets up the ESM hook + SDK automatically.
+- **Explicit (what I used, production-real):** an `instrumentation.js` that builds a `NodeSDK` with OTLP trace/metric/log exporters + `getNodeAutoInstrumentations()`, loaded via `node --import ./instrumentation.js index.js`. All config visible in one file.
+- ⚠️ **ESM:** auto-instrumentation needs the import hook; the `register` entrypoint (or recent NodeSDK) handles it. Under ESM, HTTP root spans are named just `GET`/`POST` (route enrichment limited) — traces still real.
+
+### Manual instrumentation (custom span + metric)
+```js
+import { trace, metrics } from "@opentelemetry/api";
+const tracer = trace.getTracer("jobtracker-server");
+const meter  = metrics.getMeter("jobtracker-server");
+const counter = meter.createCounter("applications.created");
+
+await tracer.startActiveSpan("create-application", async (span) => {  // becomes parent of nested spans
+  const created = await Application.create({ ...req.body, owner: req.user._id });
+  span.setAttribute("app.company", created.company);   // attributes = per-span searchable metadata
+  span.end();                                            // ⚠️ MUST end() or the span never closes
+  return created;
+});
+counter.add(1);   // bump the metric
+```
+- ⭐ **Reading a real trace:** a `POST /applications` showed `mongodb.find` (25ms) = the **protect middleware's User.findById (auth lookup!)** running *before* the controller, then `create-application` → `mongodb.insert`. You can literally SEE the per-request auth DB cost — invisible in code.
+- **Time NOT inside any child span = uninstrumented work** (bcrypt hash, JWT, network) — custom spans make it visible.
+
+### ⭐ Q: Metrics vs Traces — cardinality (interview gold)
+- A counter like `applications.created` is a **GLOBAL aggregate** — it counts every create by everyone, no identity. In Prometheus it becomes **`applications_created_total`** (dots→underscores, `_total` suffix for counters).
+- ⚠️ **NEVER put high-cardinality data (userId, email, requestId) in metric labels** → one time-series per value = **cardinality explosion** that kills the metrics DB. Metrics are cheap *because* they aggregate. Good labels have few values (`status`, `method`, `endpoint`).
+- For per-user/per-request detail → use **traces/logs or a DB query**, not metric labels. Metrics = trends/alerts; traces/logs = individual detail.
+- Counter graph is a **flat/step line** (cumulative, only goes up); for rate use `rate(applications_created_total[5m])`.
+
+### ⭐⭐ Distributed tracing (the finale) — browser → Express → Mongo, ONE trace
+- **Frontend (`client/src/tracing.js`):** `WebTracerProvider` + `OTLPTraceExporter` (to :4318) + `FetchInstrumentation`. Imported FIRST in `main.jsx`.
+- **The key: context propagation.** `FetchInstrumentation({ propagateTraceHeaderCorsUrls: [/localhost:3030/] })` adds the **`traceparent`** header to cross-origin API calls. The backend's HTTP instrumentation reads it and makes its spans **children of the browser span** → one connected trace across services.
+- ⚠️ By default, fetch does NOT add trace headers to *cross-origin* requests → without `propagateTraceHeaderCorsUrls` the trace wouldn't link. Backend `cors()` must allow the `traceparent` header (default `cors()` reflects requested headers → fine). otel-lgtm's OTLP receiver already allows browser CORS (`allowed_origins: http://*`), so the browser can export straight to :4318.
+- ⭐ **Real trace read:** browser `POST` = **103ms**, server `POST` = **75.67ms**. The **~27ms gap is network + CORS preflight — INVISIBLE on the server.** Only distributed tracing shows true *user-perceived* latency (server-only tracing would lie "75ms"). Tree: `client POST → server POST → (mongodb.find [auth] , create-application → mongodb.insert)`.
+
+### ⚠️ Logs deferred (honest note)
+Wired the pipeline (Winston logger + OTLP log exporter; otel-lgtm routes OTLP logs → Loki) but delivery never landed in this SDK-0.221/ESM/Winston combo. Time-boxed it (senior move — don't rabbit-hole a bonus). Concept understood: logs correlate with traces via an injected `trace_id` → jump log↔trace in Grafana.
+
+### ⭐⭐ Error triage (browser network errors — super useful debugging)
+| Error | Meaning | Fix |
+|---|---|---|
+| `CORS policy... no 'Access-Control-Allow-Origin'` | Server UP, browser blocks cross-origin | `app.use(cors())` on server |
+| `404` + `Unexpected token '<' ... not valid JSON` | Server UP, wrong URL → got HTML 404, `res.json()` chokes on `<!DOCTYPE` | fix endpoint path (full = mount base + route) |
+| `Failed to fetch` / `ERR_CONNECTION_REFUSED` (no status) | Server DOWN — nothing listening | start the server / check port |
+| MongoDB `IP that isn't whitelisted` | Atlas rejects the connection (dynamic IP changed) | add current IP in Atlas → Network Access |
+- **Tell:** no HTTP status = server not reached (down/wrong port). A status (401/404) = reached, logical issue.
+
+### Mongoose 9 note (hit while instrumenting)
+`findOneAndUpdate(..., { new: true })` is **deprecated** → use `{ returnDocument: "after" }` (same meaning: return the updated doc).
+
+### ▶ How to run / reproduce (self-contained — packages + commands)
+Full walkthrough lives in `Jobtracker-MERN/OBSERVABILITY.md`; the essentials:
+
+**1. Observability backend — one Docker container:**
+```bash
+docker run --name lgtm -d -p 3000:3000 -p 4317:4317 -p 4318:4318 grafana/otel-lgtm
+# Grafana → http://localhost:3000  (admin/admin). Ports: 4318 OTLP-HTTP (send here), 3000 Grafana.
+# docker ps / docker logs lgtm / docker stop lgtm / docker start lgtm
+```
+
+**2. Backend (Express) — install + run instrumented:**
+```bash
+cd server
+npm install @opentelemetry/api @opentelemetry/sdk-node @opentelemetry/auto-instrumentations-node \
+  @opentelemetry/exporter-trace-otlp-http @opentelemetry/exporter-metrics-otlp-http \
+  @opentelemetry/exporter-logs-otlp-http @opentelemetry/sdk-metrics @opentelemetry/sdk-logs winston
+# server/instrumentation.js = NodeSDK + OTLP exporters + getNodeAutoInstrumentations()
+# package.json script:  "otel": "node --import ./instrumentation.js index.js"
+npm run otel        # → "API running" + "MongoDB connected"
+```
+
+**3. Frontend (React) — install + run:**
+```bash
+cd client
+npm install @opentelemetry/sdk-trace-web @opentelemetry/sdk-trace-base \
+  @opentelemetry/exporter-trace-otlp-http @opentelemetry/context-zone \
+  @opentelemetry/instrumentation @opentelemetry/instrumentation-fetch \
+  @opentelemetry/resources @opentelemetry/semantic-conventions
+# client/src/tracing.js = WebTracerProvider + OTLPTraceExporter + FetchInstrumentation
+#   (propagateTraceHeaderCorsUrls: [/localhost:3030/])  ← imported FIRST in main.jsx
+npm run dev         # → http://localhost:5173
+```
+
+**4. View:** open the app → log in → create an application → Grafana → **Explore**:
+- **Tempo** (traces): Search → open a `POST` → the browser→Express→Mongo waterfall.
+- **Prometheus** (metrics): query `applications_created_total`.
+
+**Prereq:** Docker Desktop running (macOS+brew: `brew install --cask docker-desktop`; `open -a "Docker Desktop"`).
+**Common gotchas:** server must run via `npm run otel` (not `npm start`); Atlas IP whitelist (dynamic IP → re-add current IP); wait ~5s for batch export.
